@@ -8033,7 +8033,7 @@
     } else {
       // return promise for async loading
       return df.request(_.url, _.format)
-        .then(res => output$1(this, pulse, res.data || []));
+        .then(res => output$1(this, pulse, array(res.data)));
     }
   };
 
@@ -13006,9 +13006,9 @@
   useCanvas(true);
 
   // make dumb, simple estimate if no canvas is available
-  function estimateWidth(item) {
+  function estimateWidth(item, text) {
     currFontHeight = fontSize(item);
-    return estimate(textValue(item));
+    return estimate(textValue(item, text));
   }
 
   function estimate(text) {
@@ -13016,9 +13016,9 @@
   }
 
   // measure text width if canvas is available
-  function measureWidth(item) {
+  function measureWidth(item, text) {
     return fontSize(item) <= 0 ? 0
-      : (context$1.font = font(item), measure$1(textValue(item)));
+      : (context$1.font = font(item), measure$1(textValue(item, text)));
   }
 
   function measure$1(text) {
@@ -13033,18 +13033,24 @@
     textMetrics.width = (use && context$1) ? measureWidth : estimateWidth;
   }
 
-  function textValue(item) {
-    var s = item.text;
-    if (s == null) {
-      return '';
-    } else {
-      return item.limit > 0 ? truncate$1(item) : s + '';
-    }
+  function lineHeight(item) {
+    return item.lineHeight != null ? item.lineHeight : (fontSize(item) + 2);
   }
 
-  function truncate$1(item) {
+  function multilineOffset(item) {
+    return isArray(item.text)
+      ? (item.text.length - 1) * lineHeight(item)
+      : 0;
+  }
+
+  function textValue(item, text) {
+    var s = text || item.text;
+    return s == null ? '' : (item.limit > 0 ? truncate$1(item, s) : s + '');
+  }
+
+  function truncate$1(item, line) {
     var limit = +item.limit,
-        text = item.text + '',
+        text = (line || item.text) + '',
         width;
 
     if (textMetrics.width === measureWidth) {
@@ -13164,8 +13170,17 @@
         dy = (item.dy || 0) + offset(item) - Math.round(0.8*h), // use 4/5 offset
         w;
 
+    // get width
+    if (isArray(item.text)) {
+      // multi-line text
+      h += lineHeight(item) * (item.text.length - 1);
+      w = item.text.reduce((w, t) => Math.max(w, textMetrics.width(item, t)), 0);
+    } else {
+      // single-line text
+      w = textMetrics.width(item);
+    }
+
     // horizontal alignment
-    w = textMetrics.width(item);
     if (a === 'center') {
       dx -= (w / 2);
     } else if (a === 'right') {
@@ -13173,6 +13188,7 @@
     }
 
     bounds.set(dx+=x, dy+=y, dx+w, dy+h);
+
     if (item.angle && !mode) {
       bounds.rotate(item.angle * DegToRad, x, y);
     } else if (mode === 2) {
@@ -13183,9 +13199,9 @@
 
   function draw$4(context, scene, bounds) {
     visit(scene, function(item) {
-      var opacity, p, x, y, str;
+      var opacity, p, x, y, i, lh, str;
       if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
-      if (!(str = textValue(item))) return; // get text string
+      if (!item.text) return; // TODO calculate truncated value?
 
       opacity = item.opacity == null ? 1 : item.opacity;
       if (opacity === 0 || item.fontSize <= 0) return;
@@ -13206,12 +13222,28 @@
       x += (item.dx || 0);
       y += (item.dy || 0) + offset(item);
 
-      if (item.fill && fill(context, item, opacity)) {
-        context.fillText(str, x, y);
+      if (isArray(item.text)) {
+        lh = lineHeight(item);
+        for (i=0; i<item.text.length; ++i) {
+          str = textValue(item, item.text[i]);
+          if (item.fill && fill(context, item, opacity)) {
+            context.fillText(str, x, y);
+          }
+          if (item.stroke && stroke(context, item, opacity)) {
+            context.strokeText(str, x, y);
+          }
+          y += lh;
+        }
+      } else {
+        str = textValue(item);
+        if (item.fill && fill(context, item, opacity)) {
+          context.fillText(str, x, y);
+        }
+        if (item.stroke && stroke(context, item, opacity)) {
+          context.strokeText(str, x, y);
+        }
       }
-      if (item.stroke && stroke(context, item, opacity)) {
-        context.strokeText(str, x, y);
-      }
+
       if (item.angle) context.restore();
     });
   }
@@ -13326,7 +13358,8 @@
     'path',                                                       // path
     'x2', 'y2',                                                   // rule
     'size', 'shape',                                              // symbol
-    'text', 'angle', 'theta', 'radius', 'dx', 'dy',               // text
+    'text', 'angle', 'theta', 'radius', 'dir', 'dx', 'dy',        // text
+    'ellipsis', 'limit', 'lineHeight',
     'font', 'fontSize', 'fontWeight', 'fontStyle', 'fontVariant'  // font
   ];
 
@@ -14770,12 +14803,36 @@
       }
     },
     text: function(mdef, el, item) {
-      var value;
+      var key, value, doc, lh;
 
-      value = textValue(item);
-      if (value !== values.text) {
-        el.textContent = value;
-        values.text = value;
+      if (isArray(item.text)) {
+        // multi-line text
+        value = item.text.map(_ => textValue(item, _));
+        key = value.join('\n'); // content cache key
+
+        if (key !== values.text) {
+          domClear(el, 0);
+          doc = el.ownerDocument;
+          lh = lineHeight(item);
+          value.forEach((t, i) => {
+            const ts = domCreate(doc, 'tspan', ns);
+            ts.__data__ = item; // data binding
+            ts.textContent = t;
+            if (i) {
+              ts.setAttribute('x', 0);
+              ts.setAttribute('dy', lh);
+            }
+            el.appendChild(ts);
+          });
+          values.text = key;
+        }
+      } else {
+        // single-line text
+        value = textValue(item);
+        if (value !== values.text) {
+          el.textContent = value;
+          values.text = value;
+        }
       }
 
       setStyle(el, 'font-family', fontFamily(item));
@@ -15101,7 +15158,19 @@
       str += openTag(tag, renderer.attributes(mdef.attr, item), style);
 
       if (tag === 'text') {
-        str += escape_text(textValue(item));
+        if (isArray(item.text)) {
+          // multi-line text
+          const attrs = {x: 0, dy: lineHeight(item)},
+                lines = item.text;
+          for (let i=0; i<lines.length; ++i) {
+            str += openTag('tspan', i ? attrs: null)
+              + escape_text(textValue(item, lines[i]))
+              + closeTag('tspan');
+          }
+        } else {
+          // single-line text
+          str += escape_text(textValue(item));
+        }
       } else if (tag === 'g') {
         str += openTag('path', renderer.attributes(mdef.background, item),
           applyStyles(item, scene, 'bgrect', defs)) + closeTag('path');
@@ -15383,9 +15452,13 @@
         markBounds.union(boundItem$1(item, bound));
       });
 
-      // force reflow for legends to propagate any layout changes
-      // suppress other types to prevent overall layout jumpiness
-      if (mark.role === LegendRole) pulse.reflow();
+      // force reflow for axes/legends/titles to propagate any layout changes
+      switch (mark.role) {
+        case AxisRole:
+        case LegendRole:
+        case TitleRole:
+          pulse.reflow();
+      }
     }
 
     else {
@@ -15724,6 +15797,7 @@
         title = datum.title && item.items[indices[2]].items[0],
         titlePadding = item.titlePadding,
         bounds = item.bounds,
+        dl = title && multilineOffset(title),
         x = 0, y = 0, i, s;
 
     tempBounds$2.clear().union(bounds);
@@ -15737,28 +15811,28 @@
         x = position || 0;
         y = -offset;
         s = Math.max(minExtent, Math.min(maxExtent, -bounds.y1));
-        if (title) s = axisTitleLayout(title, s, titlePadding, 0, -1, bounds);
+        if (title) s = axisTitleLayout(view, title, s, titlePadding, dl, 0, -1, bounds);
         bounds.add(0, -s).add(range, 0);
         break;
       case Left:
         x = -offset;
         y = position || 0;
         s = Math.max(minExtent, Math.min(maxExtent, -bounds.x1));
-        if (title) s = axisTitleLayout(title, s, titlePadding, 1, -1, bounds);
+        if (title) s = axisTitleLayout(view, title, s, titlePadding, dl, 1, -1, bounds);
         bounds.add(-s, 0).add(0, range);
         break;
       case Right:
         x = width + offset;
         y = position || 0;
         s = Math.max(minExtent, Math.min(maxExtent, bounds.x2));
-        if (title) s = axisTitleLayout(title, s, titlePadding, 1, 1, bounds);
+        if (title) s = axisTitleLayout(view, title, s, titlePadding, dl, 1, 1, bounds);
         bounds.add(0, 0).add(s, range);
         break;
       case Bottom:
         x = position || 0;
         y = height + offset;
         s = Math.max(minExtent, Math.min(maxExtent, bounds.y2));
-        if (title) s = axisTitleLayout(title, s, titlePadding, 0, 1, bounds);
+        if (title) s = axisTitleLayout(view, title, s, titlePadding, 0, 0, 1, bounds);
         bounds.add(0, 0).add(range, s);
         break;
       default:
@@ -15779,18 +15853,20 @@
     return item.mark.bounds.clear().union(bounds);
   }
 
-  function axisTitleLayout(title, offset, pad, isYAxis, sign, bounds) {
+  function axisTitleLayout(view, title, offset, pad, dl, isYAxis, sign, bounds) {
     var b = title.bounds, dx = 0, dy = 0;
 
     if (title.auto) {
+      view.dirty(title);
+
       offset += pad;
 
       isYAxis
-        ? dx = (title.x || 0) - (title.x = sign * offset)
-        : dy = (title.y || 0) - (title.y = sign * offset);
+        ? dx = (title.x || 0) - (title.x = sign * (offset + dl))
+        : dy = (title.y || 0) - (title.y = sign * (offset + dl));
 
-      b.translate(-dx, -dy);
-      title.mark.bounds.set(b.x1, b.y1, b.x2, b.y2);
+      title.mark.bounds.clear().union(b.translate(-dx, -dy));
+      view.dirty(title);
 
       if (isYAxis) {
         bounds.add(0, b.y1).add(0, b.y2);
@@ -16324,24 +16400,24 @@
         case Bottom:
           break;
         default:
-          ey += title.fontSize + tpad;
+          ey += title.bounds.height() + tpad;
       }
       if (ex || ey) translate$2(view, entry, ex, ey);
 
       switch (title.orient) {
         case Left:
-          ty += legendTitleOffset(item, entry, title, anchor, 0, 1);
+          ty += legendTitleOffset(item, entry, title, anchor, 1, 1);
           break;
         case Right:
-          tx += legendTitleOffset(item, entry, title, End, 1, 0) + tpad;
-          ty += legendTitleOffset(item, entry, title, anchor, 0, 1);
+          tx += legendTitleOffset(item, entry, title, End, 0, 0) + tpad;
+          ty += legendTitleOffset(item, entry, title, anchor, 1, 1);
           break;
         case Bottom:
-          tx += legendTitleOffset(item, entry, title, anchor, 1, 0);
-          ty += legendTitleOffset(item, entry, title, End, 0, 0, 1) + tpad;
+          tx += legendTitleOffset(item, entry, title, anchor, 0, 0);
+          ty += legendTitleOffset(item, entry, title, End, -1, 0, 1) + tpad;
           break;
         default:
-          tx += legendTitleOffset(item, entry, title, anchor, 1, 0);
+          tx += legendTitleOffset(item, entry, title, anchor, 0, 0);
       }
       if (tx || ty) translate$2(view, title, tx, ty);
 
@@ -16353,15 +16429,18 @@
     }
   }
 
-  function legendTitleOffset(item, entry, title, anchor, x, lr, noBar) {
+  function legendTitleOffset(item, entry, title, anchor, y, lr, noBar) {
     const grad = item.datum.type !== 'symbol',
           vgrad = title.datum.vgrad,
           e = grad && (lr || !vgrad) && !noBar ? entry.items[0] : entry,
-          s = e.bounds[x ? 'x2' : 'y2'] - item.padding,
+          s = e.bounds[y ? 'y2' : 'x2'] - item.padding,
           u = vgrad && lr ? s : 0,
-          v = vgrad && lr ? 0 : s;
+          v = vgrad && lr ? 0 : s,
+          o = y <= 0 ? 0 : multilineOffset(title);
 
-    return Math.round(anchor === Start ? u : anchor === End ? v : 0.5 * s);
+    return Math.round(anchor === Start ? u
+      : anchor === End ? (v - o)
+      : 0.5 * (s - o));
   }
 
   function translate$2(view, item, dx, dy) {
@@ -16386,17 +16465,17 @@
     });
   }
 
-  function titleLayout(view, title, width, height, viewBounds) {
-    var item = title.items[0],
-        frame = item.frame,
-        orient = item.orient,
-        anchor = item.anchor,
-        offset = item.offset,
-        bounds = item.bounds,
-        vertical = (orient === Left || orient === Right),
-        start = 0,
-        end = vertical ? height : width,
-        x = 0, y = 0, pos;
+  function titleLayout(view, mark, width, height, viewBounds) {
+    var group = mark.items[0],
+        frame = group.frame,
+        orient = group.orient,
+        anchor = group.anchor,
+        offset = group.offset,
+        padding = group.padding,
+        title = group.items[0].items[0],
+        subtitle = group.items[1] && group.items[1].items[0],
+        end = (orient === Left || orient === Right) ? height : width,
+        start = 0, x = 0, y = 0, sx = 0, sy = 0, pos;
 
     if (frame !== Group) {
       orient === Left ? (start = viewBounds.y2, end = viewBounds.y1)
@@ -16410,20 +16489,48 @@
       : (anchor === End) ? end
       : (start + end) / 2;
 
-    tempBounds$2.clear().union(bounds);
+    if (subtitle && subtitle.text) {
+      // position subtitle
+      switch (orient) {
+        case Top:
+        case Bottom:
+          sy = title.bounds.height() + padding;
+          break;
+        case Left:
+          sx = title.bounds.width() + padding;
+          break;
+        case Right:
+          sx = -title.bounds.width() - padding;
+          break;
+      }
 
-    // position title text
+      tempBounds$2.clear().union(subtitle.bounds);
+      tempBounds$2.translate(sx - (subtitle.x || 0), sy - (subtitle.y || 0));
+      if (set(subtitle, 'x', sx) | set(subtitle, 'y', sy)) {
+        view.dirty(subtitle);
+        subtitle.bounds.clear().union(tempBounds$2);
+        subtitle.mark.bounds.clear().union(tempBounds$2);
+        view.dirty(subtitle);
+      }
+
+      tempBounds$2.clear().union(subtitle.bounds);
+    } else {
+      tempBounds$2.clear();
+    }
+    tempBounds$2.union(title.bounds);
+
+    // position title group
     switch (orient) {
       case Top:
         x = pos;
-        y = viewBounds.y1 - offset;
+        y = viewBounds.y1 - tempBounds$2.height() - offset;
         break;
       case Left:
-        x = viewBounds.x1 - offset;
+        x = viewBounds.x1 - tempBounds$2.width() - offset;
         y = pos;
         break;
       case Right:
-        x = viewBounds.x2 + offset;
+        x = viewBounds.x2 + tempBounds$2.width() + offset;
         y = pos;
         break;
       case Bottom:
@@ -16431,20 +16538,18 @@
         y = viewBounds.y2 + offset;
         break;
       default:
-        x = item.x;
-        y = item.y;
+        x = group.x;
+        y = group.y;
     }
 
-    bounds.translate(x - (item.x || 0), y - (item.y || 0));
-    if (set(item, 'x', x) | set(item, 'y', y)) {
-      item.bounds = tempBounds$2;
-      view.dirty(item);
-      item.bounds = bounds;
-      view.dirty(item);
+    if (set(group, 'x', x) | set(group, 'y', y)) {
+      tempBounds$2.translate(x, y);
+      view.dirty(group);
+      group.bounds.clear().union(tempBounds$2);
+      mark.bounds.clear().union(tempBounds$2);
+      view.dirty(group);
     }
-
-    // update bounds
-    return title.bounds.clear().union(bounds);
+    return group.bounds;
   }
 
   /**
@@ -21728,7 +21833,7 @@
         fields = _.fields,
         lon = fields && fields[0],
         lat = fields && fields[1],
-        geojson = _.geojson,
+        geojson = _.geojson || (!fields && identity),
         flag = pulse.ADD,
         mod;
 
@@ -30899,7 +31004,7 @@
     resolvefilter: ResolveFilter
   });
 
-  var version = "5.6.0";
+  var version = "5.7.0";
 
   var Default = 'default';
 
@@ -33711,6 +33816,32 @@
     }
   }
 
+  // https://www.w3.org/TR/2008/REC-WCAG20-20081211/#relativeluminancedef
+  function channel_luminance_value(channelValue) {
+    const val = channelValue / 255;
+    if (val <= 0.03928) {
+      return val / 12.92;
+    }
+    return Math.pow((val + 0.055) / 1.055, 2.4);
+  }
+
+  function luminance(color) {
+    const c = rgb(color),
+          r = channel_luminance_value(c.r),
+          g = channel_luminance_value(c.g),
+          b = channel_luminance_value(c.b);
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+
+  // https://www.w3.org/TR/2008/REC-WCAG20-20081211/#contrast-ratiodef
+  function contrast(color1, color2) {
+    const lum1 = luminance(color1),
+          lum2 = luminance(color2),
+          lumL = Math.max(lum1, lum2),
+          lumD = Math.min(lum1, lum2);
+    return (lumL + 0.05) / (lumD + 0.05);
+  }
+
   function data$1(name) {
     const data = this.context.data[name];
     return data ? data.values.value : [];
@@ -34186,6 +34317,8 @@
     lab,
     hcl,
     hsl,
+    luminance,
+    contrast,
     sequence,
     format: format$2,
     utcFormat: utcFormat$1,
@@ -36217,11 +36350,19 @@
   }
 
   function parseProjection(proj, scope) {
-    var params = {};
+    var config = scope.config.projection || {},
+        params = {};
 
     for (var name in proj) {
       if (name === 'name') continue;
       params[name] = parseParameter$1(proj[name], name, scope);
+    }
+
+    // apply projection defaults from config
+    for (name in config) {
+      if (params[name] == null) {
+        params[name] = parseParameter$1(config[name], name, scope);
+      }
     }
 
     scope.addProjection(proj.name, params);
@@ -36258,6 +36399,7 @@
   const GuideLabelStyle = 'guide-label';
   const GuideTitleStyle = 'guide-title';
   const GroupTitleStyle = 'group-title';
+  const GroupSubtitleStyle = 'group-subtitle';
 
   const Symbols$2 = 'symbol';
   const Gradient$2 = 'gradient';
@@ -36277,6 +36419,7 @@
 
   const Skip$1 = {
     name: 1,
+    style: 1,
     interactive: 1
   };
 
@@ -36578,9 +36721,11 @@
   var LegendTitleRole = 'legend-title';
 
   var TitleRole$1 = 'title';
+  var TitleTextRole = 'title-text';
+  var TitleSubtitleRole = 'title-subtitle';
 
   function encoder(_) {
-    return isObject(_) ? extend({}, _) : {value: _};
+    return isObject(_) && !isArray(_) ? extend({}, _) : {value: _};
   }
 
   function addEncode(object, name, value, set) {
@@ -37115,7 +37260,8 @@
       fontSize:    _('titleFontSize'),
       fontStyle:   _('titleFontStyle'),
       fontWeight:  _('titleFontWeight'),
-      limit:       _('titleLimit')
+      limit:       _('titleLimit'),
+      lineHeight:  _('titleLineHeight')
     }, { // require update
       align:       _('titleAlign'),
       baseline:    _('titleBaseline'),
@@ -37150,7 +37296,7 @@
 
   function getRole(spec) {
     var role = spec.role || '';
-    return (!role.indexOf('axis') || !role.indexOf('legend'))
+    return (!role.indexOf('axis') || !role.indexOf('legend') || !role.indexOf('title'))
       ? role
       : spec.type === GroupMark ? ScopeRole$1 : (role || MarkRole);
   }
@@ -37886,48 +38032,83 @@
     return getEncoding('fontSize', encode) || getStyle('fontSize', scope, style);
   }
 
-  const angleExpr = `item.orient==="${Left$1}"?-90:item.orient==="${Right$1}"?90:0`,
-        baselineExpr$1 = `item.orient==="${Bottom$1}"?"${Top$1}":"${Bottom$1}"`;
+  const angleExpr = `item.orient==="${Left$1}"?-90:item.orient==="${Right$1}"?90:0`;
 
   function parseTitle(spec, scope) {
     spec = isString(spec) ? {text: spec} : spec;
 
-    var config = scope.config.title,
-        encode = extend({}, spec.encode),
-        dataRef, title;
+    var _ = lookup$5(spec, scope.config.title),
+        encode = spec.encode || {},
+        userEncode = encode.group || {},
+        name = userEncode.name || undefined,
+        interactive = userEncode.interactive,
+        style = userEncode.style,
+        children = [],
+        dataRef, group;
 
     // single-element data source for group title
     dataRef = ref(scope.add(Collect$1(null, [{}])));
 
+    // include title text
+    children.push(buildTitle(spec, _, titleEncode(spec), dataRef));
+
+    // include subtitle text
+    if (spec.subtitle) {
+      children.push(buildSubTitle(spec, _, encode.subtitle, dataRef));
+    }
+
     // build title specification
-    encode.name = spec.name;
-    encode.interactive = spec.interactive;
-    title = buildTitle(spec, config, encode, dataRef);
-    if (spec.zindex) title.zindex = spec.zindex;
+    group = guideGroup(TitleRole$1, style, name, dataRef, interactive,
+                       groupEncode(_, userEncode), children);
+    if (spec.zindex) group.zindex = spec.zindex;
 
     // parse title specification
-    return parseMark(title, scope);
+    return parseMark(group, scope);
   }
 
-  function buildTitle(spec, config, userEncode, dataRef) {
-    var _ = lookup$5(spec, config),
-        zero = {value: 0},
-        title = spec.text,
-        encode;
+  // provide backwards-compatibility for title custom encode;
+  // the top-level encode block has been *deprecated*.
+  function titleEncode(spec) {
+    const encode = spec.encode;
+    return (encode && encode.title) || extend({
+      name: spec.name,
+      interactive: spec.interactive,
+      style: spec.style
+    }, encode);
+  }
 
-    encode = {
-      enter: {opacity: zero},
-      update: {opacity: {value: 1}},
-      exit: {opacity: zero}
-    };
+  function groupEncode(_, userEncode) {
+    var encode = {enter: {}, update: {}};
 
     addEncoders(encode, {
-      text:       title,
       orient:     _('orient'),
       anchor:     _('anchor'),
       align:      {signal: alignExpr},
       angle:      {signal: angleExpr},
-      baseline:   {signal: baselineExpr$1},
+      limit:      _('limit'),
+      frame:      _('frame'),
+      offset:     _('offset') || 0,
+      padding:    _('subtitlePadding')
+    });
+
+    return extendEncode(encode, userEncode, Skip$1);
+  }
+
+  function buildTitle(spec, _, userEncode, dataRef) {
+    var zero = {value: 0},
+        text = spec.text,
+        encode = {
+          enter: {opacity: zero},
+          update: {opacity: {value: 1}},
+          exit: {opacity: zero}
+        };
+
+    addEncoders(encode, {
+      text:       text,
+      align:      {signal: 'item.mark.group.align'},
+      angle:      {signal: 'item.mark.group.angle'},
+      limit:      {signal: 'item.mark.group.limit'},
+      baseline:   'top',
       dx:         _('dx'),
       dy:         _('dy'),
       fill:       _('color'),
@@ -37935,16 +38116,47 @@
       fontSize:   _('fontSize'),
       fontStyle:  _('fontStyle'),
       fontWeight: _('fontWeight'),
-      frame:      _('frame'),
-      limit:      _('limit'),
-      offset:     _('offset') || 0
+      lineHeight: _('lineHeight')
     }, { // update
       align:      _('align'),
       angle:      _('angle'),
       baseline:   _('baseline')
     });
 
-    return guideMark(TextMark, TitleRole$1, spec.style || GroupTitleStyle,
+    return guideMark(TextMark, TitleTextRole, GroupTitleStyle,
+                     null, dataRef, encode, userEncode);
+  }
+
+  function buildSubTitle(spec, _, userEncode, dataRef) {
+    var zero = {value: 0},
+        text = spec.subtitle,
+        encode = {
+          enter: {opacity: zero},
+          update: {opacity: {value: 1}},
+          exit: {opacity: zero}
+        };
+
+    addEncoders(encode, {
+      text:       text,
+      align:      {signal: 'item.mark.group.align'},
+      angle:      {signal: 'item.mark.group.angle'},
+      limit:      {signal: 'item.mark.group.limit'},
+      baseline:   'top',
+      dx:         _('dx'),
+      dy:         _('dy'),
+      fill:       _('subtitleColor'),
+      font:       _('subtitleFont'),
+      fontSize:   _('subtitleFontSize'),
+      fontStyle:  _('subtitleFontStyle'),
+      fontWeight: _('subtitleFontWeight'),
+      lineHeight: _('subtitleLineHeight')
+    }, { // update
+      align:      _('align'),
+      angle:      _('angle'),
+      baseline:   _('baseline')
+    });
+
+    return guideMark(TextMark, TitleSubtitleRole, GroupSubtitleStyle,
                      null, dataRef, encode, userEncode);
   }
 
@@ -38379,7 +38591,8 @@
       fontSize:    _('titleFontSize'),
       fontStyle:   _('titleFontStyle'),
       fontWeight:  _('titleFontWeight'),
-      limit:       _('titleLimit')
+      limit:       _('titleLimit'),
+      lineHeight:  _('titleLineHeight')
     }, { // require update
       align:       _('titleAlign')
     });
@@ -39153,6 +39366,12 @@
           fontSize: 13,
           fontWeight: 'bold'
         },
+        // chart subtitle
+        'group-subtitle': {
+          fill: black,
+          font: defaultFont,
+          fontSize: 12
+        },
         // defaults for styled point marks in Vega-Lite
         point: {
           size: defaultSymbolSize,
@@ -39179,7 +39398,8 @@
       title: {
         orient: 'top',
         anchor: 'middle',
-        offset: 4
+        offset: 4,
+        subtitlePadding: 3
       },
 
       // defaults for axes
@@ -39209,6 +39429,11 @@
       // correction for centering bias
       axisBand: {
         tickOffset: -1
+      },
+
+      // defaults for cartographic projection
+      projection: {
+        type: 'mercator'
       },
 
       // defaults for legends
@@ -39380,9 +39605,11 @@
   exports.isTuple = isTuple;
   exports.key = key;
   exports.lerp = lerp;
+  exports.lineHeight = lineHeight;
   exports.loader = loader;
   exports.logger = logger;
   exports.merge = merge;
+  exports.multilineOffset = multilineOffset;
   exports.one = one;
   exports.openTag = openTag;
   exports.pad = pad;
